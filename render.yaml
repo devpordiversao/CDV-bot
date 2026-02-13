@@ -1,9 +1,9 @@
 services:
   - type: worker
-    name: discord-bot
+    name: cdv-bot
     env: python
     buildCommand: pip install -r requirements.txt
-    startCommand: python discord_bot.py
+    startCommand: python cdv.py
     envVars:
       - key: DISCORD_TOKEN
         sync: false
