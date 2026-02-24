@@ -1,126 +1,154 @@
-import os
-import json
-from datetime import datetime
-from flask import Flask, jsonify, request
-import threading
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
+from discord import app_commands
+import json
+import asyncio
+import random
 
-# --------------------------
-# CONFIGURAÇÃO DO BOT
-# --------------------------
 intents = discord.Intents.default()
 intents.message_content = True
-intents.guilds = True
-intents.members = True
-intents.messages = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# --------------------------
-# LOGS
-# --------------------------
-public_logs = []
-private_logs = []
+# ====== CARREGAR TEMAS ======
+arquivos = ["temas.json", "temas2.json", "temas3.json", "temas4.json"]
+temas = {}
 
-MAX_LOGS = 500  # máximo de logs em memória
+for arquivo in arquivos:
+    with open(arquivo, "r", encoding="utf-8") as f:
+        data = json.load(f)
+        temas.update(data)
 
-def add_log(log_list, entry):
-    log_list.append(entry)
-    if len(log_list) > MAX_LOGS:
-        log_list.pop(0)
+# ====== ESTADO DO QUIZ ======
+quiz_ativo = False
+tema_atual = None
+pergunta_atual = None
+resposta_atual = None
+pontuacao = {}
+canal_quiz = None
 
-# --------------------------
-# EVENTOS DO BOT
-# --------------------------
-@bot.event
-async def on_ready():
-    print(f"✅ Bot online: {bot.user}")
 
+# ====== FUNÇÃO PERGUNTA ======
+async def nova_pergunta():
+    global pergunta_atual, resposta_atual
+
+    pergunta = random.choice(temas[tema_atual])
+    pergunta_atual = pergunta["pergunta"]
+    resposta_atual = pergunta["resposta"].lower()
+
+    embed = discord.Embed(
+        title=f"📚 Tema: {tema_atual}",
+        description=f"❓ {pergunta_atual}",
+        color=discord.Color.blue()
+    )
+
+    await canal_quiz.send(embed=embed)
+
+    # Timer
+    for i in range(20, 0, -1):
+        await canal_quiz.send(f"⏳ {i}...")
+        await asyncio.sleep(1)
+
+        if resposta_atual is None:
+            return
+
+    await canal_quiz.send("❌ Ninguém acertou!")
+    await canal_quiz.send("👉 Digite `/next` para próxima pergunta")
+
+
+# ====== COMANDO /iniciar ======
+@bot.tree.command(name="iniciar", description="Iniciar quiz")
+@app_commands.describe(tema="Nome do tema")
+async def iniciar(interaction: discord.Interaction, tema: str):
+    global quiz_ativo, tema_atual, canal_quiz, pontuacao
+
+    if tema not in temas:
+        await interaction.response.send_message("❌ Tema não existe")
+        return
+
+    quiz_ativo = True
+    tema_atual = tema
+    canal_quiz = interaction.channel
+    pontuacao = {}
+
+    await interaction.response.send_message(f"✅ Quiz iniciado no tema **{tema}**")
+
+    await nova_pergunta()
+
+
+# ====== COMANDO /next ======
+@bot.tree.command(name="next", description="Próxima pergunta")
+async def next_pergunta(interaction: discord.Interaction):
+    if not quiz_ativo:
+        await interaction.response.send_message("❌ Nenhum quiz ativo")
+        return
+
+    await interaction.response.send_message("➡️ Próxima pergunta...")
+    await nova_pergunta()
+
+
+# ====== COMANDO /stop ======
+@bot.tree.command(name="stop", description="Parar quiz")
+async def stop(interaction: discord.Interaction):
+    global quiz_ativo
+
+    if not quiz_ativo:
+        await interaction.response.send_message("❌ Nenhum quiz ativo")
+        return
+
+    quiz_ativo = False
+
+    # Top 3
+    top = sorted(pontuacao.items(), key=lambda x: x[1], reverse=True)[:3]
+
+    desc = ""
+    for i, (user, pontos) in enumerate(top, start=1):
+        desc += f"{i}º - <@{user}> ({pontos} pts)\n"
+
+    embed = discord.Embed(
+        title="🏆 Top 3",
+        description=desc if desc else "Ninguém pontuou",
+        color=discord.Color.gold()
+    )
+
+    await interaction.response.send_message("🛑 Quiz encerrado!")
+    await canal_quiz.send(embed=embed)
+
+
+# ====== DETECTAR RESPOSTAS ======
 @bot.event
 async def on_message(message):
+    global resposta_atual
+
     if message.author.bot:
         return
 
-    log_entry = {
-        "id": str(datetime.utcnow().timestamp()),
-        "timestamp": datetime.utcnow().isoformat(),
-        "guild": message.guild.name if message.guild else "DM",
-        "guild_id": message.guild.id if message.guild else None,
-        "channel": message.channel.name if hasattr(message.channel, "name") else "DM",
-        "channel_id": message.channel.id if hasattr(message.channel, "id") else None,
-        "user": str(message.author),
-        "user_id": message.author.id,
-        "content": message.content
-    }
+    if quiz_ativo and resposta_atual:
+        if message.content.lower() == resposta_atual:
+            resposta_atual = None
 
-    if message.guild:
-        everyone = message.guild.default_role
-        perms = message.channel.permissions_for(everyone)
-        if perms.view_channel:
-            add_log(public_logs, log_entry)
-            print(f"[PUBLIC] {log_entry['guild']} #{log_entry['channel']} {log_entry['user']}: {log_entry['content']}")
-        else:
-            add_log(private_logs, log_entry)
-            print(f"[PRIVATE] {log_entry['guild']} #{log_entry['channel']} {log_entry['user']}: {log_entry['content']}")
-    else:
-        add_log(private_logs, log_entry)
-        print(f"[DM] {log_entry['user']}: {log_entry['content']}")
+            pontuacao[message.author.id] = pontuacao.get(message.author.id, 0) + 1
+
+            embed = discord.Embed(
+                title="✅ Acertou!",
+                description=f"{message.author.mention} acertou!\nResposta: **{resposta_atual}**",
+                color=discord.Color.green()
+            )
+
+            await canal_quiz.send(embed=embed)
+            await canal_quiz.send("👉 Digite `/next` para continuar")
 
     await bot.process_commands(message)
 
-# --------------------------
-# FLASK API
-# --------------------------
-app = Flask(__name__)
 
-@app.route("/api/logs", methods=["GET"])
-def get_logs():
-    """Retorna todos os logs (públicos + privados)"""
-    logs = public_logs + private_logs
-    logs_sorted = sorted(logs, key=lambda x: x['timestamp'], reverse=True)
-    return jsonify(logs_sorted)
+# ====== READY ======
+@bot.event
+async def on_ready():
+    await bot.tree.sync()
+    print(f"Logado como {bot.user}")
 
-@app.route("/api/logs/public", methods=["GET"])
-def get_public_logs():
-    return jsonify(list(reversed(public_logs)))
 
-@app.route("/api/logs/private", methods=["GET"])
-def get_private_logs():
-    return jsonify(list(reversed(private_logs)))
+# ====== TOKEN ======
+import os
 
-@app.route("/api/send-dm", methods=["POST"])
-def send_dm():
-    data = request.json
-    user_id = data.get("user_id")
-    content = data.get("message")
-    if not user_id or not content:
-        return jsonify({"error": "user_id e message obrigatórios"}), 400
-
-    user = bot.get_user(int(user_id))
-    if not user:
-        return jsonify({"error": "usuário não encontrado"}), 404
-
-    async def dm_user():
-        try:
-            await user.send(content)
-            return jsonify({"success": True})
-        except Exception as e:
-            return jsonify({"error": str(e)}), 500
-
-    fut = bot.loop.create_task(dm_user())
-    bot.loop.run_until_complete(fut)
-    return fut.result()
-
-# --------------------------
-# RODA FLASK EM THREAD PARA NÃO BLOQUEAR O BOT
-# --------------------------
-def run_flask():
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
-
-threading.Thread(target=run_flask).start()
-
-# --------------------------
-# RODA O BOT
-# --------------------------
-bot.run(os.environ.get("BOT_TOKEN"))
+bot.run(os.getenv("BOT_TOKEN"))
