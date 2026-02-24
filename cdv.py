@@ -1,121 +1,171 @@
 import discord
 from discord.ext import commands, tasks
-from discord import app_commands
 import json
-import asyncio
 import random
+import asyncio
+import os
 
 intents = discord.Intents.default()
 intents.message_content = True
 
-bot = commands.Bot(command_prefix="!", intents=intents)
+bot = commands.Bot(command_prefix="/", intents=intents)
 
-# ====== CARREGAR TEMAS ======
+# ========================
+# CARREGAR TEMAS
+# ========================
 arquivos = ["temas.json", "temas2.json", "temas3.json", "temas4.json"]
 temas = {}
 
 for arquivo in arquivos:
-    with open(arquivo, "r", encoding="utf-8") as f:
-        data = json.load(f)
-        temas.update(data)
+    try:
+        with open(arquivo, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            temas.update(data)
+    except:
+        print(f"Erro ao carregar {arquivo}")
 
-# ====== ESTADO DO QUIZ ======
+# ========================
+# VARIÁVEIS
+# ========================
 quiz_ativo = False
 tema_atual = None
 pergunta_atual = None
 resposta_atual = None
-pontuacao = {}
+tempo_restante = 0
 canal_quiz = None
+pontuacao = {}
 
+# ========================
+# FUNÇÕES
+# ========================
 
-# ====== FUNÇÃO PERGUNTA ======
-async def nova_pergunta():
-    global pergunta_atual, resposta_atual
+def get_pergunta(tema):
+    lista = temas.get(tema.lower())
+    if not lista:
+        return None
+    return random.choice(lista)
 
-    pergunta = random.choice(temas[tema_atual])
-    pergunta_atual = pergunta["pergunta"]
-    resposta_atual = pergunta["resposta"].lower()
+async def iniciar_pergunta(ctx):
+    global pergunta_atual, resposta_atual, tempo_restante
+
+    q = get_pergunta(tema_atual)
+    if not q:
+        await ctx.send("❌ Tema não encontrado.")
+        return
+
+    pergunta_atual = q["pergunta"]
+    resposta_atual = q["resposta"].lower()
+    tempo_restante = 20
 
     embed = discord.Embed(
         title=f"📚 Tema: {tema_atual}",
         description=f"❓ {pergunta_atual}",
         color=discord.Color.blue()
     )
+    await ctx.send(embed=embed)
 
-    await canal_quiz.send(embed=embed)
-
-    # Timer
-    for i in range(20, 0, -1):
-        await canal_quiz.send(f"⏳ {i}...")
+    while tempo_restante > 0:
+        await ctx.send(f"⏳ {tempo_restante}...")
         await asyncio.sleep(1)
+        tempo_restante -= 1
+
+        if not quiz_ativo:
+            return
 
         if resposta_atual is None:
             return
 
-    await canal_quiz.send("❌ Ninguém acertou!")
-    await canal_quiz.send("👉 Digite `/next` para próxima pergunta")
+    await ctx.send("❌ Ninguém acertou!")
+    reset_pergunta()
 
+def reset_pergunta():
+    global pergunta_atual, resposta_atual
+    pergunta_atual = None
+    resposta_atual = None
 
-# ====== COMANDO /iniciar ======
-@bot.tree.command(name="iniciar", description="Iniciar quiz")
-@app_commands.describe(tema="Nome do tema")
-async def iniciar(interaction: discord.Interaction, tema: str):
-    global quiz_ativo, tema_atual, canal_quiz, pontuacao
+# ========================
+# COMANDOS
+# ========================
 
-    if tema not in temas:
-        await interaction.response.send_message("❌ Tema não existe")
+@bot.command()
+async def iniciar(ctx, *, tema: str):
+    global quiz_ativo, tema_atual, canal_quiz
+
+    if quiz_ativo:
+        await ctx.send("⚠️ Já existe um quiz rolando.")
+        return
+
+    if tema.lower() not in temas:
+        await ctx.send("❌ Tema inválido.")
         return
 
     quiz_ativo = True
     tema_atual = tema
-    canal_quiz = interaction.channel
-    pontuacao = {}
+    canal_quiz = ctx.channel
 
-    await interaction.response.send_message(f"✅ Quiz iniciado no tema **{tema}**")
+    await ctx.send(f"🚀 Quiz iniciado no tema **{tema}**!")
 
-    await nova_pergunta()
+    await iniciar_pergunta(ctx)
 
-
-# ====== COMANDO /next ======
-@bot.tree.command(name="next", description="Próxima pergunta")
-async def next_pergunta(interaction: discord.Interaction):
-    if not quiz_ativo:
-        await interaction.response.send_message("❌ Nenhum quiz ativo")
-        return
-
-    await interaction.response.send_message("➡️ Próxima pergunta...")
-    await nova_pergunta()
-
-
-# ====== COMANDO /stop ======
-@bot.tree.command(name="stop", description="Parar quiz")
-async def stop(interaction: discord.Interaction):
+@bot.command()
+async def next(ctx):
     global quiz_ativo
 
     if not quiz_ativo:
-        await interaction.response.send_message("❌ Nenhum quiz ativo")
+        await ctx.send("❌ Nenhum quiz ativo.")
+        return
+
+    await ctx.send("➡️ Próxima pergunta!")
+    await iniciar_pergunta(ctx)
+
+@bot.command()
+async def stop(ctx):
+    global quiz_ativo
+
+    if not quiz_ativo:
+        await ctx.send("❌ Nenhum quiz ativo.")
         return
 
     quiz_ativo = False
+    await ctx.send("🛑 Quiz encerrado!")
 
-    # Top 3
-    top = sorted(pontuacao.items(), key=lambda x: x[1], reverse=True)[:3]
+@bot.command()
+async def top(ctx):
+    if not pontuacao:
+        await ctx.send("📉 Ninguém pontuou ainda.")
+        return
+
+    ranking = sorted(pontuacao.items(), key=lambda x: x[1], reverse=True)[:3]
 
     desc = ""
-    for i, (user, pontos) in enumerate(top, start=1):
-        desc += f"{i}º - <@{user}> ({pontos} pts)\n"
+    for i, (user, pts) in enumerate(ranking, start=1):
+        desc += f"**{i}º** - {user} : {pts} pontos\n"
 
     embed = discord.Embed(
         title="🏆 Top 3",
-        description=desc if desc else "Ninguém pontuou",
+        description=desc,
         color=discord.Color.gold()
     )
 
-    await interaction.response.send_message("🛑 Quiz encerrado!")
-    await canal_quiz.send(embed=embed)
+    await ctx.send(embed=embed)
 
+@bot.command()
+async def say(ctx, *, msg):
+    respostas = [
+        "Eaiii 😎",
+        "Tô por aqui 👀",
+        "Fala comigo 🔥",
+        "Hmm interessante...",
+        "KKKK boa",
+        "Entendi 🤔"
+    ]
 
-# ====== DETECTAR RESPOSTAS ======
+    await ctx.send(f"**Lumo:** {random.choice(respostas)}")
+
+# ========================
+# EVENTO DE RESPOSTA
+# ========================
+
 @bot.event
 async def on_message(message):
     global resposta_atual
@@ -123,30 +173,26 @@ async def on_message(message):
     if message.author.bot:
         return
 
-    if quiz_ativo and resposta_atual:
+    if quiz_ativo and resposta_atual and message.channel == canal_quiz:
         if message.content.lower() == resposta_atual:
-            resposta_atual = None
+            user = str(message.author)
 
-            pontuacao[message.author.id] = pontuacao.get(message.author.id, 0) + 1
+            pontuacao[user] = pontuacao.get(user, 0) + 1
 
             embed = discord.Embed(
-                title="✅ Acertou!",
-                description=f"{message.author.mention} acertou!\nResposta: **{resposta_atual}**",
-                color=discord.Color.green()
+                title="🎉 Acertou!",
+                description=f"{message.author.mention} acertou!\n\nResposta: **{resposta_atual}**",
+                color=discord.Color.yellow()
             )
 
-            await canal_quiz.send(embed=embed)
-            await canal_quiz.send("👉 Digite `/next` para continuar")
+            await message.channel.send(embed=embed)
+
+            resposta_atual = None
 
     await bot.process_commands(message)
 
+# ========================
+# RUN
+# ========================
 
-# ====== READY ======
-@bot.event
-async def on_ready():
-    await bot.tree.sync()
-    print(f"Logado como {bot.user}")
-
-
-# ====== TOKEN ======
-bot.run("MTQ2ODAwNTQ0NjU4ODU2MzUyOA.GdVIg9.CyPewbzcdgYiv4LqVOjko02FIsNYC8HZVV5Rks")
+bot.run(os.getenv("DISCORD_TOKEN"))
