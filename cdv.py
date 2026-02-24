@@ -149,6 +149,4 @@ async def on_ready():
 
 
 # ====== TOKEN ======
-import os
-
-bot.run(os.getenv("BOT_TOKEN"))
+bot.run("MTQ2ODAwNTQ0NjU4ODU2MzUyOA.GdVIg9.CyPewbzcdgYiv4LqVOjko02FIsNYC8HZVV5Rks")
